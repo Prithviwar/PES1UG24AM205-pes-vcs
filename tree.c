@@ -128,7 +128,65 @@ static int find_entry_by_name(const Tree *tree, const char *name) {
     return -1;
 }
 
+static int write_tree_level(const Index *index, const char *prefix, size_t prefix_len, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
 
+    for (int i = 0; i < index->count; i++) {
+        const char *path = index->entries[i].path;
+
+        if (strncmp(path, prefix, prefix_len) != 0) continue;
+
+        const char *rest = path + prefix_len;
+        if (*rest == '\0') continue;
+
+        const char *slash = strchr(rest, '/');
+
+        // File directly in this directory level
+        if (!slash) {
+            if (find_entry_by_name(&tree, rest) >= 0) continue;
+            if (tree.count >= MAX_TREE_ENTRIES) return -1;
+            if (strlen(rest) >= sizeof(tree.entries[tree.count].name)) return -1;
+
+            TreeEntry *entry = &tree.entries[tree.count++];
+            entry->mode = index->entries[i].mode;
+            entry->hash = index->entries[i].hash;
+            snprintf(entry->name, sizeof(entry->name), "%s", rest);
+            continue;
+        }
+
+        // Subdirectory entry at this level
+        size_t dir_len = (size_t)(slash - rest);
+        if (dir_len == 0 || dir_len >= sizeof(tree.entries[0].name)) return -1;
+
+        char dir_name[256];
+        memcpy(dir_name, rest, dir_len);
+        dir_name[dir_len] = '\0';
+
+        if (find_entry_by_name(&tree, dir_name) >= 0) continue;
+        if (tree.count >= MAX_TREE_ENTRIES) return -1;
+
+        char child_prefix[512];
+        int n = snprintf(child_prefix, sizeof(child_prefix), "%s%s/", prefix, dir_name);
+        if (n < 0 || (size_t)n >= sizeof(child_prefix)) return -1;
+
+        ObjectID child_id;
+        if (write_tree_level(index, child_prefix, (size_t)n, &child_id) != 0) return -1;
+
+        TreeEntry *entry = &tree.entries[tree.count++];
+        entry->mode = MODE_DIR;
+        entry->hash = child_id;
+        snprintf(entry->name, sizeof(entry->name), "%s", dir_name);
+    }
+
+    void *serialized = NULL;
+    size_t serialized_len = 0;
+    if (tree_serialize(&tree, &serialized, &serialized_len) != 0) return -1;
+
+    int rc = object_write(OBJ_TREE, serialized, serialized_len, id_out);
+    free(serialized);
+    return rc;
+}
 
 // Build a tree hierarchy from the current index and write all tree
 // objects to the object store.
